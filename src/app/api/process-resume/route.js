@@ -1,436 +1,449 @@
-// app/api/process-resume/route.js
-// Enhanced API route adapted for Llama models with better error handling and quota management
+// app/api/process-resume/route.js (Updated with recruiter-focused summary)
+import { usersTable } from '../../../db/schema';
+import { db } from '../../../db/index';
+import { NextRequest, NextResponse } from 'next/server';
 
-// import { ResumeProcessorLlama, PROVIDER_CONFIGS } from '';
-import { writeFile, unlink, mkdir } from 'fs/promises';
-import path from 'path';
-import { NextResponse } from 'next/server';
-import { PROVIDER_CONFIGS, ResumeProcessorLlama } from '@/lib/pdf-processor';
+// Configuration
+const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
+const MISTRAL_API_URL = 'https://api.mistral.ai/v1/chat/completions';
+const MAX_FILE_SIZE = 16 * 1024 * 1024; // 16MB (matching UploadThing limit)
+const MAX_TEXT_LENGTH = 15000;
+const MIN_TEXT_LENGTH = 100;
 
-// Rate limiting - simple in-memory store (use Redis in production)
-const requestTracker = new Map();
-const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute window
-const MAX_REQUESTS_PER_WINDOW = 5; // Reduced for free tier APIs
-
-// Provider-specific rate limits (requests per minute)
-const PROVIDER_RATE_LIMITS = {
-  openrouter: 5,   // Conservative for free tier
-  groq: 10,        // Groq is generally more generous
-  together: 3      // Very conservative for Together AI
+// Supported file types
+const SUPPORTED_MIME_TYPES = {
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/msword': 'doc',
+  'application/pdf': 'pdf',
+  'text/plain': 'txt'
 };
 
-function checkRateLimit(clientId, provider = 'openrouter') {
-  const now = Date.now();
-  const windowStart = now - RATE_LIMIT_WINDOW;
-  const maxRequests = PROVIDER_RATE_LIMITS[provider] || MAX_REQUESTS_PER_WINDOW;
-  
-  if (!requestTracker.has(clientId)) {
-    requestTracker.set(clientId, []);
-  }
-  
-  const requests = requestTracker.get(clientId);
-  const recentRequests = requests.filter(timestamp => timestamp > windowStart);
-  
-  if (recentRequests.length >= maxRequests) {
-    return { allowed: false, remaining: 0, resetTime: Math.ceil(RATE_LIMIT_WINDOW / 1000) };
-  }
-  
-  recentRequests.push(now);
-  requestTracker.set(clientId, recentRequests);
-  return { 
-    allowed: true, 
-    remaining: maxRequests - recentRequests.length,
-    resetTime: Math.ceil(RATE_LIMIT_WINDOW / 1000)
-  };
-}
+// Updated prompt for recruiter-focused analysis
+const createAnalysisPrompt = (resumeText) => `
+You are an expert recruiter and hiring manager. Analyze the following resume and provide a concise, recruiter-focused summary for quick hiring decisions.
 
-// Initialize processor based on available API keys
-function initializeProcessor() {
-  // Check for available API keys in order of preference
-  if (process.env.OPENROUTER_API_KEY) {
-    return new ResumeProcessorLlama(PROVIDER_CONFIGS.openrouter);
-  } else if (process.env.GROQ_API_KEY) {
-    return new ResumeProcessorLlama(PROVIDER_CONFIGS.groq);
-  } else if (process.env.TOGETHER_API_KEY) {
-    return new ResumeProcessorLlama(PROVIDER_CONFIGS.together);
-  } else if (process.env.LLAMA_API_KEY) {
-    // Generic fallback - defaults to OpenRouter
-    return new ResumeProcessorLlama({
-      provider: 'openrouter',
-      apiKey: process.env.LLAMA_API_KEY
-    });
-  }
-  
-  throw new Error('No Llama API key configured. Please set OPENROUTER_API_KEY, GROQ_API_KEY, or TOGETHER_API_KEY');
-}
+Format your response as:
 
-export async function POST(request) {
-  const startTime = Date.now();
-  let tempFilePath = null;
-  let processor = null;
-  
-  try {
-    // Initialize processor
+**CANDIDATE SUMMARY (For Recruiter Use)**
+
+* **Profile:** [Education/degree, CGPA/grades if mentioned, key academic highlights - max 1 line]
+* **Experience:** [Total experience, number of internships/jobs, key companies/roles - max 1 line]  
+* **Tech Skills:** [List 5-7 most relevant technical skills, highlight the strongest ones in bold]
+* **Key Projects:** [2-3 most impressive projects with brief impact/results - max 1 line]
+* **Highlights:**
+   * [3-4 bullet points of most impressive achievements, awards, or unique qualities]
+   * [Include specific metrics, competition wins, leadership roles if available]
+   * [Focus on what makes this candidate stand out for hiring]
+* **Soft Skills:** [Communication, teamwork, leadership experience - max 1 line]
+
+**QUICK HIRE ASSESSMENT:**
+* **Strengths:** [Top 2-3 reasons to hire this candidate]
+* **Experience Level:** [Entry/Junior/Mid/Senior level with years]
+* **Best Fit For:** [Types of roles/teams this candidate would excel in]
+
+Keep the entire summary under 150 words. Focus on what a recruiter needs to know for quick screening and hiring decisions. Be specific and highlight measurable achievements.
+
+Resume Content:
+${resumeText}
+
+Provide a concise, action-oriented summary that helps recruiters make fast hiring decisions.`;
+
+// Enhanced API call with retry logic
+async function callMistralAPI(resumeText, retries = 2) {
+  const prompt = createAnalysisPrompt(resumeText);
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      processor = initializeProcessor();
+      const response = await fetch(MISTRAL_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${MISTRAL_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: 'mistral-large-latest',
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.3,
+          max_tokens: 1000, // Reduced for shorter summaries
+          top_p: 0.9,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(`Mistral API error: ${response.status} - ${errorData.error?.message || 'Unknown error'}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+        throw new Error('Invalid response format from Mistral API');
+      }
+
+      return {
+        analysis: data.choices[0].message.content,
+        tokensUsed: data.usage?.total_tokens || 0
+      };
+
     } catch (error) {
-      return NextResponse.json(
-        { 
-          success: false,
-          error: 'Llama AI service not configured. Please contact administrator.',
-          configuration: {
-            availableProviders: ['OpenRouter', 'Groq', 'Together AI'],
-            requiredEnvVars: ['OPENROUTER_API_KEY', 'GROQ_API_KEY', 'TOGETHER_API_KEY']
-          }
-        },
-        { status: 503 }
-      );
-    }
-
-    // Get client identifier for rate limiting
-    const clientId = request.headers.get('x-forwarded-for') || 
-                    request.headers.get('x-real-ip') || 
-                    'unknown';
-    
-    // Check rate limit based on provider
-    const rateLimitResult = checkRateLimit(clientId, processor.provider);
-    if (!rateLimitResult.allowed) {
-      return NextResponse.json(
-        { 
-          success: false,
-          error: `Rate limit exceeded for ${processor.provider}. Free tier has limited requests per minute.`,
-          rateLimit: {
-            remaining: rateLimitResult.remaining,
-            resetTime: rateLimitResult.resetTime,
-            provider: processor.provider,
-            message: `Free tier allows limited requests. Please wait ${rateLimitResult.resetTime} seconds.`
-          }
-        },
-        { 
-          status: 429,
-          headers: {
-            'Retry-After': rateLimitResult.resetTime.toString(),
-            'X-RateLimit-Remaining': rateLimitResult.remaining.toString(),
-            'X-RateLimit-Reset': rateLimitResult.resetTime.toString()
-          }
-        }
-      );
-    }
-
-    const formData = await request.formData();
-    const file = formData.get('file');
-    
-    if (!file) {
-      return NextResponse.json(
-        { 
-          success: false,
-          error: 'No file provided. Please select a PDF or DOCX resume file to upload.' 
-        },
-        { status: 400 }
-      );
-    }
-
-    // Validate file type
-    const allowedTypes = [
-      'application/pdf', 
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/msword' // Legacy .doc files
-    ];
-    if (!allowedTypes.includes(file.type)) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Invalid file type. Only PDF and DOCX resume files are supported.',
-          supportedTypes: ['PDF', 'DOCX'],
-          receivedType: file.type
-        },
-        { status: 400 }
-      );
-    }
-
-    // Check file size (limit to 10MB, but recommend smaller for free tier)
-    const maxSize = 10 * 1024 * 1024; // 10MB
-    const recommendedSize = 5 * 1024 * 1024; // 5MB for better processing
-    
-    if (file.size > maxSize) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: `File too large. Maximum size is ${Math.round(maxSize / 1024 / 1024)}MB.`,
-          currentSize: `${Math.round(file.size / 1024 / 1024 * 100) / 100}MB`,
-          recommendation: `For faster processing with free tier APIs, consider files under ${Math.round(recommendedSize / 1024 / 1024)}MB.`
-        },
-        { status: 400 }
-      );
-    }
-
-    // Convert file to buffer
-    const buffer = Buffer.from(await file.arrayBuffer());
-    
-    // Create temp directory if it doesn't exist
-    const tempDir = path.join(process.cwd(), 'temp');
-    try {
-      await mkdir(tempDir, { recursive: true });
-    } catch (error) {
-      if (error.code !== 'EEXIST') {
+      console.error(`API attempt ${attempt + 1} failed:`, error);
+      
+      if (attempt === retries) {
         throw error;
       }
+      
+      // Wait before retry (exponential backoff)
+      await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
     }
+  }
+}
+
+// Save resume analysis to database
+async function saveResumeToDatabase(name, resumeUrl, summaryOfResume) {
+  try {
+    console.log('Saving resume to database:', { name, resumeUrl });
     
-    // Generate unique filename to avoid conflicts
-    const timestamp = Date.now();
-    const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
-    tempFilePath = path.join(tempDir, `${timestamp}_${sanitizedFileName}`);
+    const result = await db.insert(usersTable).values({
+      name: name,
+      resumeUrl: resumeUrl,
+      summaryOfResume: summaryOfResume,
+    }).returning({
+      id: usersTable.id,
+      name: usersTable.name,
+      resumeUrl: usersTable.resumeUrl,
+      createdAt: usersTable.createdAt,
+    });
+
+    console.log('Resume saved successfully:', result[0]);
+    return result[0];
+
+  } catch (error) {
+    console.error('Database save error:', error);
+    throw new Error(`Failed to save resume to database: ${error.message}`);
+  }
+}
+
+// Fetch file from URL
+async function fetchFileFromUrl(fileUrl) {
+  try {
+    console.log('Fetching file from URL:', fileUrl);
     
-    // Save temporarily
-    await writeFile(tempFilePath, buffer);
+    const response = await fetch(fileUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`);
+    }
 
-    try {
-      // Process resume with Llama
-      console.log(`Processing resume with ${processor.provider} (${processor.model})`);
-      const result = await processor.processResume(tempFilePath);
+    const contentLength = response.headers.get('content-length');
+    if (contentLength && parseInt(contentLength) > MAX_FILE_SIZE) {
+      throw new Error(`File too large. Maximum size is ${MAX_FILE_SIZE / (1024 * 1024)}MB`);
+    }
 
-      const processingTime = Date.now() - startTime;
+    const buffer = await response.arrayBuffer();
+    const fileBuffer = Buffer.from(buffer);
+    
+    // Get content type from response headers
+    const contentType = response.headers.get('content-type') || '';
+    
+    console.log('File fetched successfully:', {
+      size: fileBuffer.length,
+      contentType: contentType
+    });
 
-      if (result.success) {
-        return NextResponse.json({
-          success: true,
-          summary: result.summary,
-          wordCount: result.wordCount,
-          processedAt: result.processedAt,
-          processingMode: result.processingMode,
-          processingTime: `${processingTime}ms`,
-          fileName: file.name,
-          fileSize: `${Math.round(file.size / 1024 * 100) / 100}KB`,
-          aiProvider: {
-            name: processor.provider,
-            model: processor.model,
-            type: 'Llama'
-          },
-          rateLimit: {
-            remaining: rateLimitResult.remaining - 1,
-            resetTime: rateLimitResult.resetTime
-          }
-        });
-      } else {
-        // Return detailed error information
-        return NextResponse.json(
-          {
-            success: false,
-            error: result.error,
-            troubleshooting: result.troubleshooting,
-            processingTime: `${processingTime}ms`,
-            fileName: file.name,
-            aiProvider: {
-              name: processor.provider,
-              model: processor.model,
-              type: 'Llama'
-            }
-          },
-          { status: 500 }
-        );
+    return {
+      buffer: fileBuffer,
+      contentType: contentType,
+      size: fileBuffer.length
+    };
+
+  } catch (error) {
+    console.error('Error fetching file from URL:', error);
+    throw new Error(`Failed to fetch file from URL: ${error.message}`);
+  }
+}
+
+// Determine file type from URL and content type
+function determineFileType(fileUrl, contentType, fileName) {
+  // First try to determine from content type
+  if (contentType && SUPPORTED_MIME_TYPES[contentType]) {
+    return SUPPORTED_MIME_TYPES[contentType];
+  }
+
+  // Fallback to file extension from URL or filename
+  const url = fileName || fileUrl;
+  const extension = url.toLowerCase().split('.').pop();
+  
+  switch (extension) {
+    case 'pdf':
+      return 'pdf';
+    case 'docx':
+      return 'docx';
+    case 'doc':
+      return 'doc';
+    case 'txt':
+      return 'txt';
+    default:
+      throw new Error(`Unsupported file type. Please upload PDF, DOCX, DOC, or TXT files.`);
+  }
+}
+
+// Fixed PDF text extraction using pdf-parse
+async function extractTextFromPDF(buffer) {
+  try {
+    // Import pdf-parse directly from its implementation file
+    const { default: pdfParse } = await import('pdf-parse/lib/pdf-parse.js');
+    
+    console.log('Extracting text from PDF buffer, size:', buffer.length);
+    
+    const data = await pdfParse(buffer);
+
+    if (!data.text || data.text.trim().length === 0) {
+      throw new Error('No readable text found in PDF. The file might be image-based or corrupted.');
+    }
+
+    let cleanText = data.text
+      .replace(/\f/g, '\n')
+      .replace(/\r\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    console.log('PDF text extracted successfully, length:', cleanText.length);
+
+    return {
+      text: cleanText,
+      pages: data.numpages,
+      metadata: data.info
+    };
+
+  } catch (error) {
+    console.error('PDF extraction error:', error);
+    throw new Error(`Failed to extract text from PDF: ${error.message}`);
+  }
+}
+
+// Enhanced Word document extraction
+async function extractTextFromWord(buffer) {
+  try {
+    const mammoth = (await import('mammoth')).default;
+    
+    console.log('Extracting text from Word buffer, size:', buffer.length);
+    
+    const result = await mammoth.extractRawText({ 
+      buffer,
+      options: {
+        includeDefaultStyleMap: true
       }
-    } finally {
-      // Clean up temp file
-      if (tempFilePath) {
-        try {
-          await unlink(tempFilePath);
-          console.log('Temp file cleaned up successfully');
-        } catch (cleanupError) {
-          console.warn('Failed to cleanup temp file:', cleanupError);
+    });
+
+    if (!result.value || result.value.trim().length === 0) {
+      throw new Error('No text found in the Word document. The file might be empty or corrupted.');
+    }
+
+    const cleanText = result.value
+      .replace(/\r\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    console.log('Word text extracted successfully, length:', cleanText.length);
+
+    return {
+      text: cleanText,
+      warnings: result.messages || []
+    };
+
+  } catch (error) {
+    console.error('Word extraction error:', error);
+    throw new Error(`Failed to extract text from Word document: ${error.message}`);
+  }
+}
+
+// Validate and clean extracted text
+function validateAndCleanText(text, filename) {
+  if (!text || typeof text !== 'string') {
+    throw new Error('Invalid text extracted from document');
+  }
+
+  const trimmedText = text.trim();
+  
+  if (trimmedText.length < MIN_TEXT_LENGTH) {
+    throw new Error(`Document appears to be too short (${trimmedText.length} characters). Please ensure your resume has substantial content.`);
+  }
+
+  if (trimmedText.length > MAX_TEXT_LENGTH) {
+    console.log(`Truncating text from ${trimmedText.length} to ${MAX_TEXT_LENGTH} characters for ${filename}`);
+    return trimmedText.substring(0, MAX_TEXT_LENGTH) + '\n\n[Document truncated for processing...]';
+  }
+
+  return trimmedText;
+}
+
+// Main POST handler for App Router
+export async function POST(request) {
+  const startTime = Date.now();
+
+  try {
+    console.log('=== RESUME PROCESSING START ===');
+    console.log('Request URL:', request.url);
+    console.log('Request method:', request.method);
+    
+    // Validate API key
+    if (!MISTRAL_API_KEY) {
+      console.error('Mistral API key not found in environment variables');
+      return NextResponse.json({ 
+        error: 'Resume analysis service is not properly configured. Please contact support.' 
+      }, { status: 500 });
+    }
+
+    // Get JSON data from request body
+    console.log('Parsing JSON data...');
+    const body = await request.json();
+    const { fileUrl, fileName, userName } = body;
+
+    console.log('Request body:', { fileUrl, fileName, userName });
+
+    if (!fileUrl) {
+      return NextResponse.json({ 
+        error: 'No file URL provided. Please upload a file first.' 
+      }, { status: 400 });
+    }
+
+    if (!fileName) {
+      return NextResponse.json({ 
+        error: 'No file name provided.' 
+      }, { status: 400 });
+    }
+
+    // Default userName if not provided
+    const nameToSave = userName || fileName.replace(/\.[^/.]+$/, ""); // Remove file extension as fallback
+
+    // Fetch file from URL
+    const { buffer: fileBuffer, contentType, size } = await fetchFileFromUrl(fileUrl);
+
+    // Validate file size
+    if (size > MAX_FILE_SIZE) {
+      throw new Error(`File too large. Maximum size is ${MAX_FILE_SIZE / (1024 * 1024)}MB`);
+    }
+
+    // Determine file type
+    const fileType = determineFileType(fileUrl, contentType, fileName);
+    
+    console.log(`Processing: ${fileName} (${fileType}, ${size} bytes)`);
+
+    let extractionResult;
+
+    // Extract text based on file type
+    console.log(`Extracting text using ${fileType} processor...`);
+    switch (fileType) {
+      case 'docx':
+        extractionResult = await extractTextFromWord(fileBuffer);
+        break;
+      case 'doc':
+        return NextResponse.json({ 
+          error: 'Legacy .doc format requires conversion. Please save as .docx format for better compatibility.' 
+        }, { status: 400 });
+      case 'pdf':
+        extractionResult = await extractTextFromPDF(fileBuffer);
+        break;
+      case 'txt':
+        extractionResult = { text: fileBuffer.toString('utf-8') };
+        break;
+      default:
+        throw new Error(`Unsupported file type: ${fileType}`);
+    }
+
+    // Validate and clean the extracted text
+    const resumeText = validateAndCleanText(extractionResult.text, fileName);
+    
+    console.log(`Text extracted successfully: ${resumeText.length} characters`);
+    console.log('First 200 characters:', resumeText.substring(0, 200) + '...');
+
+    // Analyze with Mistral AI
+    console.log('Calling Mistral API...');
+    const { analysis, tokensUsed } = await callMistralAPI(resumeText);
+
+    // Save to database
+    console.log('Saving to database...');
+    const savedRecord = await saveResumeToDatabase(nameToSave, fileUrl, analysis);
+
+    // Calculate processing time
+    const processingTime = Date.now() - startTime;
+    console.log(`Processing completed in ${processingTime}ms`);
+
+    // Return successful response with database record info
+    return NextResponse.json({
+      success: true,
+      summary: analysis, // Frontend expects 'summary' property
+      data: {
+        analysis,
+        savedRecord: savedRecord, // Include database record info
+        metadata: {
+          fileName: fileName,
+          fileType,
+          fileSize: size,
+          fileUrl: fileUrl,
+          textLength: resumeText.length,
+          originalTextLength: extractionResult.text.length,
+          truncated: extractionResult.text.length > MAX_TEXT_LENGTH,
+          processingTimeMs: processingTime,
+          tokensUsed,
+          extractionWarnings: extractionResult.warnings || []
         }
       }
-    }
+    });
+
   } catch (error) {
-    console.error('API Error:', error);
+    console.error('=== RESUME PROCESSING ERROR ===');
+    console.error('Error details:', error);
+    console.error('Stack trace:', error.stack);
     
-    const processingTime = Date.now() - startTime;
-    
-    // Clean up temp file in case of error
-    if (tempFilePath) {
-      try {
-        await unlink(tempFilePath);
-      } catch (cleanupError) {
-        console.warn('Failed to cleanup temp file after error:', cleanupError);
-      }
+    // Determine appropriate error response
+    let statusCode = 500;
+    let errorMessage = 'An unexpected error occurred while processing your resume.';
+
+    if (error.message.includes('Mistral API error')) {
+      statusCode = 502;
+      errorMessage = 'AI analysis service is temporarily unavailable. Please try again later.';
+    } else if (error.message.includes('File too large')) {
+      statusCode = 413;
+      errorMessage = error.message;
+    } else if (error.message.includes('No text found') || 
+               error.message.includes('too short') ||
+               error.message.includes('Failed to extract')) {
+      statusCode = 400;
+      errorMessage = error.message;
+    } else if (error.message.includes('Unsupported file type')) {
+      statusCode = 415;
+      errorMessage = error.message;
+    } else if (error.message.includes('Failed to fetch file')) {
+      statusCode = 400;
+      errorMessage = error.message;
+    } else if (error.message.includes('Failed to save resume to database')) {
+      statusCode = 500;
+      errorMessage = 'Resume was analyzed successfully but could not be saved. Please try again.';
     }
-    
-    // Provide specific error responses for Llama APIs
-    if (error.message?.includes('ENOENT')) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Resume file not found or inaccessible.',
-          processingTime: `${processingTime}ms`
-        },
-        { status: 404 }
-      );
-    }
-    
-    if (error.message?.includes('EMFILE') || error.message?.includes('ENFILE')) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Server is currently busy processing resumes. Please try again in a few moments.',
-          suggestion: 'Free tier APIs have limited concurrent requests.',
-          processingTime: `${processingTime}ms`
-        },
-        { status: 503 }
-      );
-    }
-    
-    // Llama API specific errors
-    if (error.message?.includes('rate limit') || error.message?.includes('429')) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Llama API rate limit exceeded. Please wait before trying again.',
-          suggestion: 'Free tier APIs have strict rate limits. Consider upgrading for higher limits.',
-          processingTime: `${processingTime}ms`,
-          provider: processor?.provider || 'unknown'
-        },
-        { status: 429 }
-      );
-    }
-    
-    if (error.message?.includes('quota') || error.message?.includes('billing')) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'API quota exceeded or billing issue.',
-          suggestion: 'Check your API provider dashboard for quota and billing status.',
-          processingTime: `${processingTime}ms`,
-          provider: processor?.provider || 'unknown'
-        },
-        { status: 402 }
-      );
-    }
-    
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'An unexpected error occurred while processing your resume with Llama AI.',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        processingTime: `${processingTime}ms`,
-        provider: processor?.provider || 'unknown'
-      },
-      { status: 500 }
-    );
+
+    return NextResponse.json({ 
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    }, { status: statusCode });
   }
 }
 
-// Enhanced health check endpoint
+// Handle other HTTP methods
 export async function GET() {
-  try {
-    const healthStatus = {
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      memory: process.memoryUsage(),
-      version: process.version,
-      service: 'Resume Processor (Llama AI)'
-    };
-
-    // Check API key configurations
-    const apiKeyStatus = {
-      openrouter: !!process.env.OPENROUTER_API_KEY,
-      groq: !!process.env.GROQ_API_KEY,
-      together: !!process.env.TOGETHER_API_KEY,
-      generic: !!process.env.LLAMA_API_KEY
-    };
-
-    const configuredProviders = Object.entries(apiKeyStatus)
-      .filter(([, configured]) => configured)
-      .map(([provider]) => provider);
-
-    if (configuredProviders.length === 0) {
-      healthStatus.status = 'unhealthy';
-      healthStatus.warnings = ['No Llama API keys configured'];
-      healthStatus.configuration = {
-        required: 'At least one API key needed',
-        options: ['OPENROUTER_API_KEY', 'GROQ_API_KEY', 'TOGETHER_API_KEY', 'LLAMA_API_KEY']
-      };
-    } else {
-      healthStatus.configuration = {
-        configuredProviders,
-        activeProvider: configuredProviders[0], // First available will be used
-        totalProviders: configuredProviders.length
-      };
-    }
-
-    // Test processor initialization
-    try {
-      const testProcessor = initializeProcessor();
-      healthStatus.ai = {
-        provider: testProcessor.provider,
-        model: testProcessor.model,
-        status: 'ready'
-      };
-    } catch (error) {
-      healthStatus.ai = {
-        status: 'error',
-        error: error.message
-      };
-      healthStatus.status = 'degraded';
-    }
-
-    // Rate limiting status
-    healthStatus.rateLimiting = {
-      enabled: true,
-      windowMinutes: RATE_LIMIT_WINDOW / 60000,
-      limits: PROVIDER_RATE_LIMITS,
-      activeConnections: requestTracker.size
-    };
-
-    return NextResponse.json(healthStatus);
-  } catch (error) {
-    return NextResponse.json(
-      {
-        status: 'unhealthy',
-        error: error.message,
-        timestamp: new Date().toISOString(),
-        service: 'Resume Processor (Llama AI)'
-      },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json({ 
+    error: 'Method not allowed. Use POST to process resume.' 
+  }, { status: 405 });
 }
 
-// Configuration endpoint (GET /api/process-resume/config)
-
-
-// Handle other HTTP methods with helpful messages
 export async function PUT() {
-  return NextResponse.json(
-    { 
-      error: 'Method not allowed. Use POST to upload resume files.',
-      supportedMethods: ['POST', 'GET'],
-      endpoints: {
-        'POST /': 'Upload and process resume',
-        'GET /': 'Health check',
-        'GET /config': 'Get configuration'
-      }
-    },
-    { status: 405 }
-  );
+  return NextResponse.json({ 
+    error: 'Method not allowed. Use POST to process resume.' 
+  }, { status: 405 });
 }
 
 export async function DELETE() {
-  return NextResponse.json(
-    { 
-      error: 'Method not allowed. Use POST to upload resume files.',
-      supportedMethods: ['POST', 'GET']
-    },
-    { status: 405 }
-  );
-}
-
-export async function PATCH() {
-  return NextResponse.json(
-    { 
-      error: 'Method not allowed. Use POST to upload resume files.',
-      supportedMethods: ['POST', 'GET']
-    },
-    { status: 405 }
-  );
+  return NextResponse.json({ 
+    error: 'Method not allowed. Use POST to process resume.' 
+  }, { status: 405 });
 }
