@@ -24,22 +24,21 @@ You are an expert recruiter and hiring manager. Analyze the following resume and
 
 Format your response as:
 
-**CANDIDATE SUMMARY (For Recruiter Use)**
 
-* **Profile:** [Education/degree, CGPA/grades if mentioned, key academic highlights - max 1 line]
-* **Experience:** [Total experience, number of internships/jobs, key companies/roles - max 1 line]  
-* **Tech Skills:** [List 5-7 most relevant technical skills, highlight the strongest ones in bold]
-* **Key Projects:** [2-3 most impressive projects with brief impact/results - max 1 line]
-* **Highlights:**
+* Profile: [Education/degree, CGPA/grades if mentioned, key academic highlights - max 1 line]
+* Experience: [Total experience, number of internships/jobs, key companies/roles - max 1 line]  
+* Tech Skills: [List 5-7 most relevant technical skills, highlight the strongest ones in bold]
+* Key Projects: [2-3 most impressive projects with brief impact/results - max 1 line]
+* Highlights:
    * [3-4 bullet points of most impressive achievements, awards, or unique qualities]
    * [Include specific metrics, competition wins, leadership roles if available]
    * [Focus on what makes this candidate stand out for hiring]
-* **Soft Skills:** [Communication, teamwork, leadership experience - max 1 line]
+* Soft Skills: [Communication, teamwork, leadership experience - max 1 line]
 
 **QUICK HIRE ASSESSMENT:**
-* **Strengths:** [Top 2-3 reasons to hire this candidate]
-* **Experience Level:** [Entry/Junior/Mid/Senior level with years]
-* **Best Fit For:** [Types of roles/teams this candidate would excel in]
+* Strengths: [Top 2-3 reasons to hire this candidate]
+* Experience Level: [Entry/Junior/Mid/Senior level with years]
+* Best Fit For: [Types of roles/teams this candidate would excel in]
 
 Keep the entire summary under 150 words. Focus on what a recruiter needs to know for quick screening and hiring decisions. Be specific and highlight measurable achievements.
 
