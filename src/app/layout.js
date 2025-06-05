@@ -18,11 +18,11 @@ export const metadata = {
   openGraph: {
     title: "SnapSum",
     description: "SnapSum - Summarize your PDFs with AI",
-    url: "https://snapsum.vercel.app",
+    url: "https://snapcv-kohl.vercel.app/",
     siteName: "SnapSum",
     images: [
       {
-        url: "https://gojf7j54p4.ufs.sh/snap-sum-og-image.png",
+        url: "https://gojf7j54p4.ufs.sh/f/CcC11ljtXd0c5L0Ch2EoHV6KuzLAEMekUxlpn9y4f2c7sGdB",
         width: 1200,
         height: 630,
       },
