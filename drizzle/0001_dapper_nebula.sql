@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "structured_data" jsonb;
